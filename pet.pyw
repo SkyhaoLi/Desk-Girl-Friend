@@ -13,7 +13,7 @@ if os.path.exists(_tcl_dir):
 import tkinter as tk
 
 BASE_DIR = Path(__file__).parent
-FRAMES_DIR = BASE_DIR / "assets" / "frames_nobg"
+FRAMES_DIR = BASE_DIR / "assets" / "frames_fixed"
 CONFIG_FILE = BASE_DIR / "config.json"
 
 WIN_W, WIN_H, FPS = 130, 180, 24
@@ -39,12 +39,13 @@ WORK_KEYWORDS = [
     "飞书", "feishu", "lark", "钉钉", "dingtalk",
     "word", "excel", "powerpoint", "outlook", "teams",
     "photoshop", "illustrator", "figma", "sketch", "canva", "ps",
-    "vscode", "visual studio", "pycharm", "intellij", "cursor", "code",
+    "vscode", "visual studio", "pycharm", "intellij", "cursor",
     "notion", "obsidian", "typora", "markdown",
     "blender", "maya", "cinema4d", "ae", "after effects",
     "pr", "premiere", "达芬奇", "剪映", "capcut",
     "chrome", "edge", "firefox", "safari", "浏览器",
     "设计", "开发", "代码", "编程", "文档", "编辑",
+    "claude", "mimo", "mc",
 ]
 
 DIALOGUES = {
@@ -162,8 +163,9 @@ class DesktopPet:
                 frames = []
                 for f in sorted(state_dir.glob("*.png")):
                     img = Image.open(f).convert("RGBA")
-                    scale = target_h / img.height
-                    img = img.resize((int(img.width * scale), target_h), Image.LANCZOS)
+                    if img.height != target_h:
+                        scale = target_h / img.height
+                        img = img.resize((max(1, int(img.width * scale)), target_h), Image.LANCZOS)
                     frames.append(img)
                 if frames:
                     self.all_frames[state_name] = frames
@@ -276,6 +278,65 @@ class DesktopPet:
         except:
             return False, ""
 
+    def check_notifications(self):
+        """检测微信/飞书通知"""
+        try:
+            import ctypes
+
+            # 通知应用关键词
+            notify_apps = ["微信", "weixin", "wechat", "飞书", "feishu", "lark", "钉钉", "dingtalk"]
+
+            # 遍历所有顶层窗口
+            result = []
+
+            def enum_callback(hwnd, lParam):
+                if ctypes.windll.user32.IsWindowVisible(hwnd):
+                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buf = ctypes.create_unicode_buffer(length + 1)
+                        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                        title = buf.value.lower()
+
+                        # 检查是否是通知应用
+                        for app in notify_apps:
+                            if app in title:
+                                # 检查窗口是否在闪烁（有通知）
+                                FLASHW_STOP = 0
+                                FLASHW_CAPTION = 0x00000001
+                                FLASHW_TRAY = 0x00000002
+                                FLASHW_ALL = FLASHW_CAPTION | FLASHW_TRAY
+
+                                class FLASHWINFO(ctypes.Structure):
+                                    _fields_ = [
+                                        ("cbSize", ctypes.c_uint),
+                                        ("hwnd", ctypes.c_void_p),
+                                        ("dwFlags", ctypes.c_uint),
+                                        ("uCount", ctypes.c_uint),
+                                        ("dwTimeout", ctypes.c_uint),
+                                    ]
+
+                                fwi = FLASHWINFO()
+                                fwi.cbSize = ctypes.sizeof(FLASHWINFO)
+                                fwi.hwnd = hwnd
+
+                                # 获取窗口信息
+                                GUICON_FLASHING = 0x00000001
+                                guick = ctypes.windll.user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+
+                                # 简单检测：如果窗口标题包含数字（未读数），可能是通知
+                                import re
+                                if re.search(r'\(\d+\)', title) or re.search(r'\[\d+\]', title):
+                                    result.append((hwnd, title))
+                                    break
+                return True
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            ctypes.windll.user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+
+            return len(result) > 0, result
+        except Exception as e:
+            return False, []
+
     # ===================== 交互 =====================
     def on_click(self, event):
         self.is_dragging = True
@@ -325,6 +386,14 @@ class DesktopPet:
         if not is_work and self.current_state == "work":
             self.set_state("exhausted", duration=FPS * 4)
             self.show_bubble("终于干完了...", 3000)
+            self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
+            return
+
+        # 检测通知
+        has_notify, notify_info = self.check_notifications()
+        if has_notify and self.current_state == "idle":
+            self.set_state("greet", duration=FPS * 3)
+            self.show_bubble("有消息~", 2500)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
             return
 
@@ -404,9 +473,17 @@ class DesktopPet:
 
         # 应用变换
         if self.frames:
-            img = self.frames[min(self.frame_idx, len(self.frames)-1)].copy()
+            base_img = self.frames[min(self.frame_idx, len(self.frames)-1)]
+            img = base_img.copy()
             if abs(self.anim_rot) > 0.1:
-                img = img.rotate(self.anim_rot, expand=False, resample=Image.BICUBIC)
+                rotated = img.rotate(self.anim_rot, expand=True, resample=Image.BICUBIC)
+                canvas_w = max(base_img.width, rotated.width)
+                canvas_h = max(base_img.height, rotated.height)
+                canvas_img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+                paste_x = (canvas_w - rotated.width) // 2
+                paste_y = (canvas_h - rotated.height) // 2
+                canvas_img.paste(rotated, (paste_x, paste_y), rotated)
+                img = canvas_img
             self.tk_img = ImageTk.PhotoImage(img)
             self.canvas.coords(self.char_id, self.char_x + self.anim_dx, self.char_y + self.anim_dy)
             self.canvas.itemconfig(self.char_id, image=self.tk_img)
