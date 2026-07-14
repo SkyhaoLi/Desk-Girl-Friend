@@ -161,7 +161,6 @@ class DesktopPet:
         # 状态计时
         self.time = 0
         self.state_timer = 0
-        self.idle_static_timer = 0  # 待机静态帧计时
         self.last_activity_time = time.time()
         self.IDLE_TIMEOUT = 30
         self.WORK_CHECK_INTERVAL = 3
@@ -356,7 +355,7 @@ class DesktopPet:
             return
 
         # 创建过渡动画
-        if with_transition and self.current_state != state:
+        if with_transition:
             transition = self.create_transition(self.current_state, state)
             if transition:
                 self.transition_frames = transition
@@ -485,14 +484,13 @@ class DesktopPet:
         self.show_bubble(self.random_dialogue("miss"), 3000)
 
     def on_key(self, event):
-        # tkinter 焦点下的按键更新活动时间（全局钩子也会处理，这里仅兜底）
-        self.last_activity_time = time.time()
+        now = time.time()
+        self.last_activity_time = now
+        self.last_keypress_time = now
 
     # ===================== 空闲检测 =====================
     def check_idle(self):
-        """检查空闲状态 - 工作状态优先级最高"""
         now = time.time()
-        idle_duration = now - self.last_activity_time
 
         # 同步 last_activity_time：钩子直接写 last_keypress_time，这里拉齐
         if self.last_keypress_time > self.last_activity_time:
