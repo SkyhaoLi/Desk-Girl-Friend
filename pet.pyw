@@ -621,13 +621,10 @@ class DesktopPet:
                         self.set_state(interrupt, duration=FPS * 3)
                         self.show_bubble(self.random_dialogue(interrupt), 2500)
             elif self.current_state == "work" and self.frames and len(self.frames) > 1:
-                # work 状态：掏键盘段只播一次，之后循环后半段（打字）
-                # WORK_LOOP_START 是打字循环的起始帧，约占总帧数的 1/4
-                loop_start = max(1, len(self.frames) // 4)
+                loop_start = min(len(self.frames) - 1, max(1, len(self.frames) // 6))
                 if not self.work_intro_done:
                     self.frame_idx += 1
-                    if self.frame_idx >= len(self.frames):
-                        # 掏键盘动作播完，进入打字循环
+                    if self.frame_idx >= loop_start:
                         self.work_intro_done = True
                         self.frame_idx = loop_start
                 else:
