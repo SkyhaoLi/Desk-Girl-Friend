@@ -168,6 +168,7 @@ class DesktopPet:
         self.last_activity_time = time.time()
         self.IDLE_TIMEOUT = 30
         self.WORK_CHECK_INTERVAL = 3
+        self.work_intro_done = False  # 是否已播完掏键盘动作，之后只循环打字段
 
         # 动画参数
         self.anim_dx = 0
@@ -360,11 +361,19 @@ class DesktopPet:
                 self.transition_idx = 0
                 self.is_transitioning = True
 
+        prev_state = self.current_state
         self.current_state = state
         self.frames = self.all_frames[state]
         self.frame_idx = 0
         if duration > 0:
             self.state_timer = duration
+
+        # 进入 work 状态时重置 intro，让掏键盘动作重头播
+        if state == "work" and prev_state != "work":
+            self.work_intro_done = False
+        # 离开 work 状态时重置 intro
+        if state != "work" and prev_state == "work":
+            self.work_intro_done = False
 
     def show_bubble(self, text, duration=3000):
         """显示聊天气泡 - 白底黑字"""
@@ -650,6 +659,20 @@ class DesktopPet:
                         interrupt = random.choice(self.idle_interrupt_states)
                         self.set_state(interrupt, duration=FPS * 3)
                         self.show_bubble(self.random_dialogue(interrupt), 2500)
+            elif self.current_state == "work" and self.frames and len(self.frames) > 1:
+                # work 状态：掏键盘段只播一次，之后循环后半段（打字）
+                # WORK_LOOP_START 是打字循环的起始帧，约占总帧数的 1/4
+                loop_start = max(1, len(self.frames) // 4)
+                if not self.work_intro_done:
+                    self.frame_idx += 1
+                    if self.frame_idx >= len(self.frames):
+                        # 掏键盘动作播完，进入打字循环
+                        self.work_intro_done = True
+                        self.frame_idx = loop_start
+                else:
+                    self.frame_idx += 1
+                    if self.frame_idx >= len(self.frames):
+                        self.frame_idx = loop_start
             elif self.frames and len(self.frames) > 1:
                 self.frame_idx = (self.frame_idx + 1) % len(self.frames)
 
