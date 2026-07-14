@@ -105,20 +105,17 @@ DEFAULT_STATE_CONFIGS = {
     "slacking":  {"trigger": "idle_interrupt", "label": "摸鱼",    "dialogues": DEFAULT_DIALOGUES["slacking"]},
 }
 
-# 办公软件关键词
+# 办公软件关键词（精确匹配窗口标题，避免误触发）
 WORK_KEYWORDS = [
-    "cmd", "powershell", "terminal", "wt", "终端",
-    "wps", "文字", "表格", "演示", "pdf",
-    "飞书", "feishu", "lark", "钉钉", "dingtalk",
-    "word", "excel", "powerpoint", "outlook", "teams",
-    "photoshop", "illustrator", "figma", "sketch", "canva", "ps",
-    "vscode", "visual studio", "pycharm", "intellij", "cursor",
-    "notion", "obsidian", "typora", "markdown",
-    "blender", "maya", "cinema4d", "ae", "after effects",
-    "pr", "premiere", "达芬奇", "剪映", "capcut",
-    "chrome", "edge", "firefox", "safari", "浏览器",
-    "设计", "开发", "代码", "编程", "文档", "编辑",
-    "claude", "mimo", "mc",
+    "cmd", "powershell", "terminal", "终端",
+    "wps", "飞书", "feishu", "lark", "钉钉", "dingtalk",
+    "microsoft word", "microsoft excel", "microsoft powerpoint", "outlook", "teams",
+    "photoshop", "illustrator", "figma", "sketch", "canva",
+    "vscode", "visual studio code", "visual studio", "pycharm", "intellij idea", "cursor",
+    "notion", "obsidian", "typora",
+    "blender", "maya", "after effects", "adobe premiere",
+    "达芬奇", "剪映", "capcut",
+    "claude",
 ]
 
 
@@ -350,6 +347,12 @@ class DesktopPet:
     def set_state(self, state, duration=0, with_transition=True):
         """设置状态"""
         if state not in self.all_frames:
+            return
+
+        # 同状态不重置，避免打断正在播放的动画
+        if state == self.current_state:
+            if duration > 0:
+                self.state_timer = duration
             return
 
         # 创建过渡动画
@@ -991,8 +994,12 @@ class DesktopPet:
         HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
         def low_level_keyboard_proc(nCode, wParam, lParam):
-            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                self.root.after(0, self._on_global_keypress)
+            try:
+                if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                    self.root.after(0, self._on_global_keypress)
+            except Exception:
+                pass
+            # 必须调用 CallNextHookEx，否则系统按键链条断裂导致键盘失效
             return ctypes.windll.user32.CallNextHookEx(self._hook_hook_id, nCode, wParam, lParam)
 
         self._hook_proc_ref = HOOKPROC(low_level_keyboard_proc)
@@ -1013,6 +1020,10 @@ class DesktopPet:
         """全局按键回调，在主线程执行（由 root.after 调度）。"""
         now = time.time()
         self.last_activity_time = now
+        # 已在工作状态则无需重新判断，避免打断动画
+        if self.current_state == "work":
+            self.last_keypress_time = now
+            return
         # 距上次按键超过 2 秒视为新一轮打字，触发工作动画
         if now - self.last_keypress_time > 2.0:
             is_work, _ = self.check_work_activity()
