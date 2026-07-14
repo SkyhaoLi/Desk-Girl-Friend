@@ -181,6 +181,8 @@ class DesktopPet:
         self.is_dragging = False
         self.drag_x = self.drag_y = 0
         self.interaction_cd = False
+        self.last_keypress_time = 0  # 上次按键时间，用于检测打字开始
+        self.is_typing = False  # 是否正在打字（防止重复触发工作动画）
 
         # 隐藏状态
         self.is_hidden = False
@@ -219,6 +221,7 @@ class DesktopPet:
         self.animate()
         self.check_idle()
         self.check_fullscreen()
+        self._start_global_keyboard_hook()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def load_config(self):
@@ -510,6 +513,7 @@ class DesktopPet:
         self.show_bubble(self.random_dialogue("miss"), 3000)
 
     def on_key(self, event):
+        # tkinter 焦点下的按键更新活动时间（全局钩子也会处理，这里仅兜底）
         self.last_activity_time = time.time()
 
     # ===================== 空闲检测 =====================
@@ -522,14 +526,15 @@ class DesktopPet:
 
         # 工作状态优先级最高
         if is_work:
+            # 只有当前不在工作状态时才切换（气泡由 on_key 负责弹出）
             if self.current_state != "work":
                 self.set_state("work", with_transition=False)
-                self.show_bubble("开始工作~", 2000)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
             return
 
         # 离开工作状态
         if not is_work and self.current_state == "work":
+            self.is_typing = False
             self.set_state("exhausted", duration=FPS * 4)
             self.show_bubble("终于干完了...", 3000)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
@@ -976,9 +981,64 @@ class DesktopPet:
 
     def on_close(self):
         self.save_config()
+        self._stop_global_keyboard_hook()
         if self._tray_icon is not None:
             self._tray_icon.stop()
         self.root.destroy()
+
+    def _start_global_keyboard_hook(self):
+        """在后台线程安装全局低级键盘钩子，检测任意窗口的按键事件。"""
+        self._hook_thread = threading.Thread(target=self._keyboard_hook_thread, daemon=True)
+        self._hook_running = True
+        self._hook_hook_id = None
+        self._hook_thread.start()
+
+    def _stop_global_keyboard_hook(self):
+        self._hook_running = False
+        if hasattr(self, '_hook_thread_hwnd') and self._hook_thread_hwnd:
+            ctypes.windll.user32.PostThreadMessageW(self._hook_thread_id, 0x0012, 0, 0)  # WM_QUIT
+
+    def _keyboard_hook_thread(self):
+        """低级键盘钩子线程（必须在同一线程安装和消息循环）。"""
+        WH_KEYBOARD_LL = 13
+        WM_KEYDOWN = 0x0100
+        WM_SYSKEYDOWN = 0x0104
+
+        self._hook_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+
+        HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+        def low_level_keyboard_proc(nCode, wParam, lParam):
+            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                self.root.after(0, self._on_global_keypress)
+            return ctypes.windll.user32.CallNextHookEx(self._hook_hook_id, nCode, wParam, lParam)
+
+        self._hook_proc_ref = HOOKPROC(low_level_keyboard_proc)
+        self._hook_hook_id = ctypes.windll.user32.SetWindowsHookExW(
+            WH_KEYBOARD_LL, self._hook_proc_ref, None, 0
+        )
+
+        msg = wintypes.MSG()
+        while self._hook_running and ctypes.windll.user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
+            ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
+            ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
+
+        if self._hook_hook_id:
+            ctypes.windll.user32.UnhookWindowsHookEx(self._hook_hook_id)
+            self._hook_hook_id = None
+
+    def _on_global_keypress(self):
+        """全局按键回调，在主线程执行（由 root.after 调度）。"""
+        now = time.time()
+        self.last_activity_time = now
+        # 距上次按键超过 2 秒视为新一轮打字，触发工作动画
+        if now - self.last_keypress_time > 2.0:
+            is_work, _ = self.check_work_activity()
+            if is_work and self.current_state in ("idle", "exhausted"):
+                self.set_state("work", with_transition=False)
+                self.show_bubble("开始工作~", 2000)
+                self.is_typing = True
+        self.last_keypress_time = now
 
     def run(self):
         self.root.mainloop()
