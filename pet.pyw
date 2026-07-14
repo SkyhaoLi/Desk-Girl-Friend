@@ -105,9 +105,17 @@ DEFAULT_STATE_CONFIGS = {
     "slacking":  {"trigger": "idle_interrupt", "label": "摸鱼",    "dialogues": DEFAULT_DIALOGUES["slacking"]},
 }
 
-# 办公软件关键词（精确匹配窗口标题，避免误触发）
+# 进程名关键词（exe 路径里匹配，补充标题里检测不到的情况）
+WORK_PROCESS_KEYWORDS = [
+    "cmd.exe", "powershell.exe", "windowsterminal.exe", "pwsh.exe",
+    "code.exe", "cursor.exe", "pycharm64.exe", "idea64.exe",
+    "photoshop.exe", "illustrator.exe",
+    "blender.exe", "maya.exe",
+]
+
+# 窗口标题关键词（精确匹配，避免误触发）
 WORK_KEYWORDS = [
-    "cmd", "powershell", "terminal", "终端",
+    "cmd", "命令提示符", "powershell", "terminal", "终端", "windows terminal",
     "wps", "飞书", "feishu", "lark", "钉钉", "dingtalk",
     "microsoft word", "microsoft excel", "microsoft powerpoint", "outlook", "teams",
     "photoshop", "illustrator", "figma", "sketch", "canva",
@@ -419,14 +427,30 @@ class DesktopPet:
 
     # ===================== 办公检测 =====================
     def check_work_activity(self):
-        """检测前台窗口是否是办公/创作应用"""
+        """检测前台窗口是否是办公/创作应用（标题 + 进程名双重匹配）"""
         try:
             hwnd = ctypes.windll.user32.GetForegroundWindow()
+            # 窗口标题
             length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
             buf = ctypes.create_unicode_buffer(length + 1)
             ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value.lower()
-            return any(kw in title for kw in WORK_KEYWORDS), title
+            if any(kw in title for kw in WORK_KEYWORDS):
+                return True, title
+            # 进程名（cmd.exe/powershell.exe 等标题里不含关键词）
+            pid = wintypes.DWORD()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            PROCESS_QUERY_LIMITED = 0x1000
+            h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED, False, pid.value)
+            if h:
+                exe_buf = ctypes.create_unicode_buffer(260)
+                size = wintypes.DWORD(260)
+                ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, exe_buf, ctypes.byref(size))
+                ctypes.windll.kernel32.CloseHandle(h)
+                exe = exe_buf.value.lower()
+                if any(kw in exe for kw in WORK_PROCESS_KEYWORDS):
+                    return True, exe
+            return False, title
         except:
             return False, ""
 
