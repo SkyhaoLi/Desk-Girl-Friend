@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """猫耳女友桌宠 - 完整版"""
-import os, sys, math, random, json, subprocess, winreg, time, threading, queue, ctypes
+import os, sys, math, random, json, subprocess, winreg, time, threading, ctypes
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import Menu
-from PIL import Image, ImageTk, ImageFilter
+from PIL import Image, ImageTk
 
 _tcl_dir = os.path.join(os.path.dirname(sys.executable), "tcl")
 if os.path.exists(_tcl_dir):
@@ -183,7 +183,6 @@ class DesktopPet:
         self.drag_x = self.drag_y = 0
         self.interaction_cd = False
         self.last_keypress_time = 0  # 上次按键时间，用于检测打字开始
-        self.is_typing = False  # 是否正在打字（防止重复触发工作动画）
 
         # 隐藏状态
         self.is_hidden = False
@@ -422,29 +421,22 @@ class DesktopPet:
 
     # ===================== 办公检测 =====================
     def check_work_activity(self):
-        """检测是否有办公/创作活动"""
+        """检测前台窗口是否是办公/创作应用"""
         try:
-            import ctypes
             hwnd = ctypes.windll.user32.GetForegroundWindow()
             length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
             buf = ctypes.create_unicode_buffer(length + 1)
             ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value.lower()
-
-            is_work = any(kw in title for kw in WORK_KEYWORDS)
-            return is_work, title
+            return any(kw in title for kw in WORK_KEYWORDS), title
         except:
             return False, ""
 
     def check_notifications(self):
-        """检测微信/飞书通知"""
+        """检测微信/飞书等通知（标题含未读数字）"""
         try:
-            import ctypes
-
-            # 通知应用关键词
             notify_apps = ["微信", "weixin", "wechat", "飞书", "feishu", "lark", "钉钉", "dingtalk"]
-
-            # 遍历所有顶层窗口
+            import re
             result = []
 
             def enum_callback(hwnd, lParam):
@@ -454,45 +446,15 @@ class DesktopPet:
                         buf = ctypes.create_unicode_buffer(length + 1)
                         ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
                         title = buf.value.lower()
-
-                        # 检查是否是通知应用
-                        for app in notify_apps:
-                            if app in title:
-                                # 检查窗口是否在闪烁（有通知）
-                                FLASHW_STOP = 0
-                                FLASHW_CAPTION = 0x00000001
-                                FLASHW_TRAY = 0x00000002
-                                FLASHW_ALL = FLASHW_CAPTION | FLASHW_TRAY
-
-                                class FLASHWINFO(ctypes.Structure):
-                                    _fields_ = [
-                                        ("cbSize", ctypes.c_uint),
-                                        ("hwnd", ctypes.c_void_p),
-                                        ("dwFlags", ctypes.c_uint),
-                                        ("uCount", ctypes.c_uint),
-                                        ("dwTimeout", ctypes.c_uint),
-                                    ]
-
-                                fwi = FLASHWINFO()
-                                fwi.cbSize = ctypes.sizeof(FLASHWINFO)
-                                fwi.hwnd = hwnd
-
-                                # 获取窗口信息
-                                GUICON_FLASHING = 0x00000001
-                                guick = ctypes.windll.user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
-
-                                # 简单检测：如果窗口标题包含数字（未读数），可能是通知
-                                import re
-                                if re.search(r'\(\d+\)', title) or re.search(r'\[\d+\]', title):
-                                    result.append((hwnd, title))
-                                    break
+                        if any(app in title for app in notify_apps):
+                            if re.search(r'\(\d+\)', title) or re.search(r'\[\d+\]', title):
+                                result.append((hwnd, title))
                 return True
 
             WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
             ctypes.windll.user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
-
             return len(result) > 0, result
-        except Exception as e:
+        except Exception:
             return False, []
 
     # ===================== 交互 =====================
@@ -543,7 +505,6 @@ class DesktopPet:
 
         # 离开工作状态
         if not is_work and self.current_state == "work":
-            self.is_typing = False
             self.set_state("exhausted", duration=FPS * 4)
             self.show_bubble("终于干完了...", 3000)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
@@ -1018,7 +979,7 @@ class DesktopPet:
 
     def _stop_global_keyboard_hook(self):
         self._hook_running = False
-        if hasattr(self, '_hook_thread_hwnd') and self._hook_thread_hwnd:
+        if hasattr(self, '_hook_thread_id') and self._hook_thread_id:
             ctypes.windll.user32.PostThreadMessageW(self._hook_thread_id, 0x0012, 0, 0)  # WM_QUIT
 
     def _keyboard_hook_thread(self):
@@ -1060,7 +1021,6 @@ class DesktopPet:
             if is_work and self.current_state in ("idle", "exhausted"):
                 self.set_state("work", with_transition=False)
                 self.show_bubble("开始工作~", 2000)
-                self.is_typing = True
         self.last_keypress_time = now
 
     def run(self):
