@@ -178,7 +178,6 @@ class DesktopPet:
         self.is_dragging = False
         self.drag_x = self.drag_y = 0
         self.interaction_cd = False
-        self.last_keypress_time = 0.0  # 上次按键时间（由钩子线程直接写入，主线程轮询读取）
 
         # 隐藏状态
         self.is_hidden = False
@@ -217,7 +216,6 @@ class DesktopPet:
         self.animate()
         self.check_idle()
         self.check_fullscreen()
-        self._start_global_keyboard_hook()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def load_config(self):
@@ -484,48 +482,35 @@ class DesktopPet:
         self.show_bubble(self.random_dialogue("miss"), 3000)
 
     def on_key(self, event):
-        now = time.time()
-        self.last_activity_time = now
-        self.last_keypress_time = now
+        self.last_activity_time = time.time()
 
     # ===================== 空闲检测 =====================
     def check_idle(self):
         now = time.time()
+        idle_duration = now - self.last_activity_time
 
-        # 同步 last_activity_time：钩子直接写 last_keypress_time，这里拉齐
-        if self.last_keypress_time > self.last_activity_time:
-            self.last_activity_time = self.last_keypress_time
+        is_work, title = self.check_work_activity()
 
-        # 工作判断：前台是工作软件 且 10秒内有按键
-        is_work_app, title = self.check_work_activity()
-        recently_typed = (now - self.last_keypress_time) < 10.0
-        is_work = is_work_app and recently_typed
-
-        # 进入工作状态：前台是工作软件 且 有按键活动
         if is_work:
-            if self.current_state not in ("work",):
+            if self.current_state != "work":
                 self.set_state("work", with_transition=False)
                 self.show_bubble("开始工作~", 2000)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
             return
 
-        # 离开工作状态
         if self.current_state == "work":
             self.set_state("exhausted", duration=FPS * 4)
             self.show_bubble("终于干完了...", 3000)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
             return
 
-        # 检测通知
-        has_notify, notify_info = self.check_notifications()
+        has_notify, _ = self.check_notifications()
         if has_notify and self.current_state == "idle":
             self.set_state("greet", duration=FPS * 3)
             self.show_bubble("有消息~", 2500)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
             return
 
-        # 空闲状态 - 只有在待机状态下才触发随机事件
-        idle_duration = now - self.last_activity_time
         if self.current_state == "idle" and idle_duration > self.IDLE_TIMEOUT:
             state = random.choice(self.idle_random_states)
             self.set_state(state, duration=FPS * 3)
@@ -969,53 +954,9 @@ class DesktopPet:
 
     def on_close(self):
         self.save_config()
-        self._stop_global_keyboard_hook()
         if self._tray_icon is not None:
             self._tray_icon.stop()
         self.root.destroy()
-
-    def _start_global_keyboard_hook(self):
-        """在后台线程安装全局低级键盘钩子，检测任意窗口的按键事件。"""
-        self._hook_thread = threading.Thread(target=self._keyboard_hook_thread, daemon=True)
-        self._hook_running = True
-        self._hook_hook_id = None
-        self._hook_thread.start()
-
-    def _stop_global_keyboard_hook(self):
-        self._hook_running = False
-        if hasattr(self, '_hook_thread_id') and self._hook_thread_id:
-            ctypes.windll.user32.PostThreadMessageW(self._hook_thread_id, 0x0012, 0, 0)  # WM_QUIT
-
-    def _keyboard_hook_thread(self):
-        """低级键盘钩子线程（必须在同一线程安装和消息循环）。"""
-        WH_KEYBOARD_LL = 13
-        WM_KEYDOWN = 0x0100
-        WM_SYSKEYDOWN = 0x0104
-
-        self._hook_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-
-        HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-
-        def low_level_keyboard_proc(nCode, wParam, lParam):
-            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                # 只写时间戳，不向主线程调度任何回调
-                # WH_KEYBOARD_LL 要求 300ms 内返回，调度 root.after 可能导致超时后钩子被系统移除
-                self.last_keypress_time = time.time()
-            return ctypes.windll.user32.CallNextHookEx(self._hook_hook_id, nCode, wParam, lParam)
-
-        self._hook_proc_ref = HOOKPROC(low_level_keyboard_proc)
-        self._hook_hook_id = ctypes.windll.user32.SetWindowsHookExW(
-            WH_KEYBOARD_LL, self._hook_proc_ref, None, 0
-        )
-
-        msg = wintypes.MSG()
-        while self._hook_running and ctypes.windll.user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
-            ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
-            ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
-
-        if self._hook_hook_id:
-            ctypes.windll.user32.UnhookWindowsHookEx(self._hook_hook_id)
-            self._hook_hook_id = None
 
     def run(self):
         self.root.mainloop()
