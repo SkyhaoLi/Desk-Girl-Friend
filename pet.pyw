@@ -179,7 +179,7 @@ class DesktopPet:
         self.is_dragging = False
         self.drag_x = self.drag_y = 0
         self.interaction_cd = False
-        self.last_keypress_time = 0  # 上次按键时间，用于检测打字开始
+        self.last_keypress_time = 0.0  # 上次按键时间（由钩子线程直接写入，主线程轮询读取）
 
         # 隐藏状态
         self.is_hidden = False
@@ -366,15 +366,13 @@ class DesktopPet:
         prev_state = self.current_state
         self.current_state = state
         self.frames = self.all_frames[state]
-        self.frame_idx = 0
+        # work 状态从 -1 开始，让第一次 += 1 恰好显示第 0 帧（掏键盘起始）
+        self.frame_idx = -1 if state == "work" else 0
         if duration > 0:
             self.state_timer = duration
 
         # 进入 work 状态时重置 intro，让掏键盘动作重头播
-        if state == "work" and prev_state != "work":
-            self.work_intro_done = False
-        # 离开 work 状态时重置 intro
-        if state != "work" and prev_state == "work":
+        if state == "work":
             self.work_intro_done = False
 
     def show_bubble(self, text, duration=3000):
@@ -496,18 +494,25 @@ class DesktopPet:
         now = time.time()
         idle_duration = now - self.last_activity_time
 
-        is_work, title = self.check_work_activity()
+        # 同步 last_activity_time：钩子直接写 last_keypress_time，这里拉齐
+        if self.last_keypress_time > self.last_activity_time:
+            self.last_activity_time = self.last_keypress_time
 
-        # 工作状态优先级最高
+        # 工作判断：前台是工作软件 且 10秒内有按键
+        is_work_app, title = self.check_work_activity()
+        recently_typed = (now - self.last_keypress_time) < 10.0
+        is_work = is_work_app and recently_typed
+
+        # 进入工作状态：前台是工作软件 且 有按键活动
         if is_work:
-            # 只有当前不在工作状态时才切换（气泡由 on_key 负责弹出）
-            if self.current_state != "work":
+            if self.current_state not in ("work",):
                 self.set_state("work", with_transition=False)
+                self.show_bubble("开始工作~", 2000)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
             return
 
         # 离开工作状态
-        if not is_work and self.current_state == "work":
+        if self.current_state == "work":
             self.set_state("exhausted", duration=FPS * 4)
             self.show_bubble("终于干完了...", 3000)
             self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
@@ -522,11 +527,11 @@ class DesktopPet:
             return
 
         # 空闲状态 - 只有在待机状态下才触发随机事件
-        if not is_work and self.current_state == "idle":
-            if idle_duration > self.IDLE_TIMEOUT:
-                state = random.choice(self.idle_random_states)
-                self.set_state(state, duration=FPS * 3)
-                self.show_bubble(self.random_dialogue(state), 2500)
+        idle_duration = now - self.last_activity_time
+        if self.current_state == "idle" and idle_duration > self.IDLE_TIMEOUT:
+            state = random.choice(self.idle_random_states)
+            self.set_state(state, duration=FPS * 3)
+            self.show_bubble(self.random_dialogue(state), 2500)
 
         self.root.after(self.WORK_CHECK_INTERVAL * 1000, self.check_idle)
 
@@ -639,7 +644,7 @@ class DesktopPet:
                 self.frame_idx = (self.frame_idx + 1) % len(self.frames)
 
             if self.frames:
-                display_img = self.frames[min(self.frame_idx, len(self.frames) - 1)]
+                display_img = self.frames[max(0, min(self.frame_idx, len(self.frames) - 1))]
 
         # 整体动画参数（平滑过渡）— 过渡期间也更新，避免结束时位置跳变
         if self.current_state == "idle":
@@ -994,12 +999,10 @@ class DesktopPet:
         HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
         def low_level_keyboard_proc(nCode, wParam, lParam):
-            try:
-                if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                    self.root.after(0, self._on_global_keypress)
-            except Exception:
-                pass
-            # 必须调用 CallNextHookEx，否则系统按键链条断裂导致键盘失效
+            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                # 只写时间戳，不向主线程调度任何回调
+                # WH_KEYBOARD_LL 要求 300ms 内返回，调度 root.after 可能导致超时后钩子被系统移除
+                self.last_keypress_time = time.time()
             return ctypes.windll.user32.CallNextHookEx(self._hook_hook_id, nCode, wParam, lParam)
 
         self._hook_proc_ref = HOOKPROC(low_level_keyboard_proc)
@@ -1015,22 +1018,6 @@ class DesktopPet:
         if self._hook_hook_id:
             ctypes.windll.user32.UnhookWindowsHookEx(self._hook_hook_id)
             self._hook_hook_id = None
-
-    def _on_global_keypress(self):
-        """全局按键回调，在主线程执行（由 root.after 调度）。"""
-        now = time.time()
-        self.last_activity_time = now
-        # 已在工作状态则无需重新判断，避免打断动画
-        if self.current_state == "work":
-            self.last_keypress_time = now
-            return
-        # 距上次按键超过 2 秒视为新一轮打字，触发工作动画
-        if now - self.last_keypress_time > 2.0:
-            is_work, _ = self.check_work_activity()
-            if is_work and self.current_state in ("idle", "exhausted"):
-                self.set_state("work", with_transition=False)
-                self.show_bubble("开始工作~", 2000)
-        self.last_keypress_time = now
 
     def run(self):
         self.root.mainloop()
