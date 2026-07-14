@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""提取状态视频的原始帧"""
+"""提取状态视频的原始帧
+用法:
+  python extract_all.py                    # 处理全部预定义状态
+  python extract_all.py <state>            # 处理指定状态（用预定义文件名）
+  python extract_all.py <state> <video>    # 处理指定状态，用自定义视频路径
+"""
 import cv2
 from PIL import Image
 import os
@@ -33,15 +38,33 @@ def clear_pngs(folder):
             os.remove(os.path.join(folder, fname))
 
 
-def iter_states():
+def parse_args():
+    """解析命令行参数，返回 [(state, video_path), ...]"""
     args = sys.argv[1:]
     if not args:
-        return STATES
-    return [state for state in args if state in STATE_FILES]
+        # 无参数：全部预定义状态
+        return [(s, os.path.join(VIDEOS_DIR, STATE_FILES[s])) for s in STATES]
+
+    result = []
+    i = 0
+    while i < len(args):
+        state = args[i]
+        # 如果下一个参数存在且不是已知状态名，视为视频路径
+        if i + 1 < len(args) and args[i + 1] not in STATE_FILES and not args[i + 1].startswith("-"):
+            video_path = args[i + 1]
+            i += 2
+        elif state in STATE_FILES:
+            video_path = os.path.join(VIDEOS_DIR, STATE_FILES[state])
+            i += 1
+        else:
+            # 未知状态名，尝试 videos/<state>.mp4
+            video_path = os.path.join(VIDEOS_DIR, f"{state}.mp4")
+            i += 1
+        result.append((state, video_path))
+    return result
 
 
-for state in iter_states():
-    video_path = os.path.join(VIDEOS_DIR, STATE_FILES[state])
+for state, video_path in parse_args():
     output_dir = os.path.join(OUTPUT_BASE, state)
 
     if not os.path.exists(video_path):
@@ -54,7 +77,7 @@ for state in iter_states():
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f"  {state}: {total} frames @ {fps}fps")
+    print(f"  {state}: {total} frames @ {fps}fps  ({video_path})")
 
     frame_idx = 0
     while True:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""温和修复边缘 - 保留 alpha，只清理离散噪点和黑边污染"""
+"""修复边缘 - 填内部洞 + alpha 锐化 + 去白边污染"""
 from PIL import Image
 import numpy as np
 from scipy import ndimage
@@ -15,9 +15,20 @@ DEFAULT_STATES = [
 ]
 
 ALPHA_KEEP_THRESHOLD = 3
-COLOR_SOURCE_ALPHA = 24
-FRINGE_RADIUS = 3
+COLOR_SOURCE_ALPHA = 20
+FRINGE_RADIUS = 5
 MIN_COMPONENT_SIZE = 12
+
+# Alpha 锐化参数
+ALPHA_LOW = 100
+ALPHA_HIGH = 190
+
+# 暗色偏移：-transparentcolor "black" 会把 RGB=(0,0,0) 变透明，
+# 角色的黑色特征（头发、瞳孔）需要提升到此值以上才不会被吃掉
+DARK_RGB_MIN = 8
+
+# 抗锯齿：锐化后在边缘外圈补 1px 半透明过渡
+AA_ALPHA = 120
 
 
 def iter_states():
@@ -34,6 +45,7 @@ def clear_pngs(folder):
 
 
 def remove_tiny_components(alpha):
+    """移除离散小噪点（保留最大连通区域 + 大于阈值的组件）"""
     mask = alpha > ALPHA_KEEP_THRESHOLD
     if not mask.any():
         return alpha
@@ -56,7 +68,49 @@ def remove_tiny_components(alpha):
     return cleaned
 
 
+def fill_interior_holes(arr):
+    """填充被不透明区域包围的内部洞（角色身体上的缺块）。
+    用 binary_fill_holes 只填内部洞，外部透明区域不受影响。"""
+    alpha = arr[:, :, 3]
+    opaque = alpha > 128
+
+    # binary_fill_holes：把被 True 包围的 False 区域填为 True
+    filled_mask = ndimage.binary_fill_holes(opaque)
+
+    # 新填的像素 = filled_mask 中为 True 但原 opaque 为 False
+    new_pixels = filled_mask & ~opaque
+    if not new_pixels.any():
+        return arr
+
+    # 填 alpha = 255
+    arr[:, :, 3][new_pixels] = 255
+
+    # 填 RGB：用最近邻不透明像素的颜色
+    if opaque.any():
+        distance, nearest = ndimage.distance_transform_edt(
+            ~opaque, return_indices=True
+        )
+        # 对所有新填像素取最近不透明源
+        ys, xs = np.where(new_pixels)
+        src_y = nearest[0][new_pixels]
+        src_x = nearest[1][new_pixels]
+        for c in range(3):
+            arr[:, :, c][new_pixels] = arr[:, :, c][src_y, src_x]
+
+    return arr
+
+
+def sharpen_alpha(alpha):
+    """Alpha 对比度拉伸：压缩半透明过渡带，让边缘更锐利。
+    alpha < ALPHA_LOW → 0, alpha > ALPHA_HIGH → 255, 中间线性拉伸。"""
+    alpha_f = alpha.astype(np.float32)
+    # 线性拉伸
+    scaled = (alpha_f - ALPHA_LOW) * 255.0 / (ALPHA_HIGH - ALPHA_LOW)
+    return np.clip(scaled, 0, 255).astype(np.uint8)
+
+
 def decontaminate_rgb(arr):
+    """去白边/颜色污染：半透明边缘的 RGB 用最近不透明像素替换。"""
     alpha = arr[:, :, 3]
     source_mask = alpha >= COLOR_SOURCE_ALPHA
     fringe_mask = (alpha > 0) & ~source_mask
@@ -76,13 +130,64 @@ def decontaminate_rgb(arr):
     return arr
 
 
+def shift_dark_rgb(arr):
+    """把极暗像素的 RGB 提升到 DARK_RGB_MIN 以上，防止被
+    -transparentcolor "black" 当成透明吃掉。只改 RGB，不改 alpha。"""
+    alpha = arr[:, :, 3]
+    opaque = alpha > 128
+    if not opaque.any():
+        return arr
+    for c in range(3):
+        ch = arr[:, :, c]
+        too_dark = opaque & (ch < DARK_RGB_MIN)
+        ch[too_dark] = DARK_RGB_MIN
+    return arr
+
+
+def add_antialias(arr):
+    """在锐化后的硬边缘外圈补 1px 半透明过渡，消除锯齿。
+    找到不透明区域边界外侧的完全透明像素，给它们赋一个低 alpha 值。"""
+    alpha = arr[:, :, 3]
+    opaque = alpha > 200
+    if not opaque.any():
+        return arr
+    # 膨胀 1px，找出紧邻不透明区域的外圈像素
+    dilated = ndimage.binary_dilation(opaque, iterations=1)
+    outer_ring = dilated & ~opaque & (alpha == 0)
+    if not outer_ring.any():
+        return arr
+    # 用最近不透明像素的颜色填充这些像素
+    distance, nearest = ndimage.distance_transform_edt(~opaque, return_indices=True)
+    src_y = nearest[0][outer_ring]
+    src_x = nearest[1][outer_ring]
+    for c in range(3):
+        arr[:, :, c][outer_ring] = arr[:, :, c][src_y, src_x]
+    arr[:, :, 3][outer_ring] = AA_ALPHA
+    return arr
+
+
 def clean_frame(img):
     arr = np.array(img, dtype=np.uint8)
     alpha = arr[:, :, 3].astype(np.uint8)
 
+    # 1. 去噪点
     alpha = remove_tiny_components(alpha)
     arr[:, :, 3] = alpha
+
+    # 2. 填内部洞（角色身体缺块）
+    arr = fill_interior_holes(arr)
+
+    # 3. Alpha 锐化（边缘更清晰）
+    arr[:, :, 3] = sharpen_alpha(arr[:, :, 3])
+
+    # 4. 去白边污染
     arr = decontaminate_rgb(arr)
+
+    # 5. 暗色偏移：防止黑色特征被 -transparentcolor 吃掉
+    arr = shift_dark_rgb(arr)
+
+    # 6. 抗锯齿：在硬边缘外圈补 1px 半透明过渡
+    arr = add_antialias(arr)
 
     return Image.fromarray(arr, "RGBA")
 

@@ -1,6 +1,25 @@
+# Python
 __pycache__/
 *.pyc
 Lib/
 Scripts/
 .mimocode/
-*.bat
+
+# 虚拟环境
+venv/
+env/
+
+# 大体积生成素材（可从视频通过管线重新生成）
+assets/frames/
+assets/frames_nobg/
+assets/frames_fixed/
+
+# 用户配置与日志
+config.json
+pet_log.txt
+reprocess_log.txt
+
+# 临时文件
+*.tmp
+*.bak
+.git/index.lock
