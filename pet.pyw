@@ -621,7 +621,8 @@ class DesktopPet:
                         self.set_state(interrupt, duration=FPS * 3)
                         self.show_bubble(self.random_dialogue(interrupt), 2500)
             elif self.current_state == "work" and self.frames and len(self.frames) > 1:
-                loop_start = min(len(self.frames) - 1, max(1, len(self.frames) // 6))
+                # 掏键盘动作在前50帧，之后循环打字段
+                loop_start = min(50, len(self.frames) - 1)
                 if not self.work_intro_done:
                     self.frame_idx += 1
                     if self.frame_idx >= loop_start:
